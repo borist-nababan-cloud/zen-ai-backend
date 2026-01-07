@@ -70,6 +70,39 @@ try {
   process.exit(1);
 }
 
+// Helper function: Extract JSON from mixed content
+function extractJSONFromText(text) {
+  // Try to find JSON object in the text
+  const jsonPattern = /\{[^{}]*"action"[^{}]*\}/;
+  const match = text.match(jsonPattern);
+
+  if (match) {
+    try {
+      return JSON.parse(match[0]);
+    } catch (e) {
+      // If parsing fails, try more aggressive extraction
+      const openBrace = text.indexOf('{');
+      const closeBrace = text.lastIndexOf('}');
+      if (openBrace !== -1 && closeBrace !== -1 && closeBrace > openBrace) {
+        try {
+          return JSON.parse(text.substring(openBrace, closeBrace + 1));
+        } catch (e2) {
+          // Return null if all parsing attempts fail
+          return null;
+        }
+      }
+    }
+  }
+
+  // Try parsing the entire cleaned text as fallback
+  const cleanJson = text.replace(/```json/g, '').replace(/```/g, '').trim();
+  try {
+    return JSON.parse(cleanJson);
+  } catch (e) {
+    return null;
+  }
+}
+
 // Health check endpoint
 app.get('/health', (_req, res) => {
   const healthcheck = {
@@ -141,18 +174,16 @@ app.post('/ask-ai', async (req, res) => {
       Current Date: ${today}.
       Current Screen Data: ${JSON.stringify(contextData).slice(0, 1500)}...
 
-      RULES:
-      1. If the answer is in "Current Screen Data", answer directly in Markdown.
-      2. If you need more data (e.g., past history, specific items), Query the Database.
-      3. TO QUERY: Return ONLY a JSON object. Do not add text like "Here is the query".
+      CRITICAL RULES:
+      1. If the answer is in "Current Screen Data", respond directly in friendly, conversational Markdown format.
+      2. If you need more data (past history, specific items), you MUST Query the Database.
+      3. TO QUERY DATABASE: Return ONLY a raw JSON object. NO markdown, NO text before/after, NO explanation.
       4. DATE FORMAT: Always use YYYY-MM-DD. Calculate "yesterday" relative to ${today}.
 
-      JSON FORMAT FOR QUERYING:
-      {
-        "action": "QUERY_DB",
-        "view": "view_name_here",
-        "filters": { "column": "val", "date_start": "YYYY-MM-DD", "date_end": "YYYY-MM-DD" }
-      }
+      JSON FORMAT FOR QUERYING (return this EXACT format, nothing else):
+      {"action":"QUERY_DB","view":"view_name","filters":{"date_start":"YYYY-MM-DD","date_end":"YYYY-MM-DD"}}
+
+      AFTER RECEIVING DATABASE RESULTS: Analyze the data and provide a clear, friendly, conversational response in Markdown. DO NOT return JSON.
 
       Database Schema: ${dbSchema}
     `;
@@ -168,7 +199,7 @@ app.post('/ask-ai', async (req, res) => {
           { role: "user", content: message }
         ],
         temperature: 0.1,
-        max_tokens: 2000 // Prevent excessive token usage
+        max_tokens: 2000
       },
       {
         headers: {
@@ -177,86 +208,103 @@ app.post('/ask-ai', async (req, res) => {
           "HTTP-Referer": process.env.SITE_URL || "https://your-site.com",
           "X-Title": "WMS Dashboard"
         },
-        timeout: 30000 // 30 second timeout
+        timeout: 30000
       }
     );
 
     let reply = aiResponse.data.choices[0].message.content;
     console.log(`[${requestId}] Received AI response, length: ${reply.length} chars`);
+    console.log(`[${requestId}] Response preview: ${reply.substring(0, 200)}...`);
 
     // --- CHECK FOR TOOL CALL ---
-    const cleanJson = reply.replace(/```json/g, '').replace(/```/g, '').trim();
+    const toolCall = extractJSONFromText(reply);
 
-    try {
-      const tool = JSON.parse(cleanJson);
+    if (toolCall && toolCall.action === 'QUERY_DB') {
+      console.log(`[${requestId}] AI requesting DB query:`, toolCall);
 
-      if (tool.action === 'QUERY_DB') {
-        console.log(`[${requestId}] AI requesting DB query:`, tool);
+      // Validate view name to prevent SQL injection
+      const validViews = [
+        'view_financial_dashboard',
+        'view_operational_dashboard',
+        'view_product_mix',
+        'view_peak_hours'
+      ];
 
-        // Validate view name to prevent SQL injection
-        const validViews = [
-          'view_financial_dashboard',
-          'view_operational_dashboard',
-          'view_product_mix',
-          'view_peak_hours'
-        ];
-
-        if (!validViews.includes(tool.view)) {
-          console.error(`[${requestId}] Invalid view name: ${tool.view}`);
-          return res.status(400).json({
-            error: 'Invalid database view requested'
-          });
-        }
-
-        // Build query with filters
-        let query = supabase.from(tool.view).select('*').limit(50);
-
-        if (tool.filters?.date_start) {
-          query = query.gte('tanggal', tool.filters.date_start);
-        }
-        if (tool.filters?.date_end) {
-          query = query.lte('tanggal', tool.filters.date_end);
-        }
-
-        const { data: dbResult, error } = await query;
-
-        if (error) {
-          console.error(`[${requestId}] Database error:`, error);
-          throw error;
-        }
-
-        console.log(`[${requestId}] DB query returned ${dbResult?.length || 0} rows`);
-
-        // Follow up with AI
-        const followUp = await axios.post(
-          "https://openrouter.ai/api/v1/chat/completions",
-          {
-            model: "deepseek/deepseek-chat",
-            messages: [
-              { role: "system", content: systemPrompt },
-              { role: "user", content: message },
-              { role: "assistant", content: JSON.stringify(tool) },
-              { role: "system", content: `DB RESULT: ${JSON.stringify(dbResult)}` }
-            ],
-            temperature: 0.1,
-            max_tokens: 2000
-          },
-          {
-            headers: {
-              "Authorization": `Bearer ${apiKey}`,
-              "Content-Type": "application/json",
-              "HTTP-Referer": process.env.SITE_URL || "https://your-site.com",
-              "X-Title": "WMS Dashboard"
-            },
-            timeout: 30000
-          }
-        );
-
-        reply = followUp.data.choices[0].message.content;
+      if (!validViews.includes(toolCall.view)) {
+        console.error(`[${requestId}] Invalid view name: ${toolCall.view}`);
+        return res.status(400).json({
+          error: 'Invalid database view requested'
+        });
       }
-    } catch (parseError) {
-      // Not a valid JSON, treat as normal response
-      console.log(`[${requestId}] Response is direct text, not a tool call`);
+
+      // Build query with filters
+      let query = supabase.from(toolCall.view).select('*').limit(50);
+
+      if (toolCall.filters?.date_start) {
+        query = query.gte('tanggal', toolCall.filters.date_start);
+      }
+      if (toolCall.filters?.date_end) {
+        query = query.lte('tanggal', toolCall.filters.date_end);
+      }
+
+      const { data: dbResult, error } = await query;
+
+      if (error) {
+        console.error(`[${requestId}] Database error:`, error);
+        throw error;
+      }
+
+      console.log(`[${requestId}] DB query returned ${dbResult?.length || 0} rows`);
+
+      // Follow up with AI - EXPLICITLY request natural language response
+      const followUpPrompt = `
+        You previously received a database query result. Based on this data, provide a clear, friendly, conversational answer to the user's question: "${message}"
+
+        Database Results: ${JSON.stringify(dbResult)}
+
+        IMPORTANT:
+        - Respond in natural, conversational Markdown format
+        - DO NOT return JSON
+        - DO NOT include technical details
+        - Be helpful and friendly
+        - Use formatting (bullet points, tables) where appropriate
+      `;
+
+      const followUp = await axios.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        {
+          model: "deepseek/deepseek-chat",
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: message },
+            { role: "assistant", content: JSON.stringify(toolCall) },
+            { role: "user", content: followUpPrompt }
+          ],
+          temperature: 0.3, // Slightly higher for more natural responses
+          max_tokens: 2000
+        },
+        {
+          headers: {
+            "Authorization": `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+            "HTTP-Referer": process.env.SITE_URL || "https://your-site.com",
+            "X-Title": "WMS Dashboard"
+          },
+          timeout: 30000
+        }
+      );
+
+      reply = followUp.data.choices[0].message.content;
+      console.log(`[${requestId}] Final AI response received, length: ${reply.length} chars`);
+
+      // Final safety check: if response still contains JSON, try to clean it
+      const finalCheck = extractJSONFromText(reply);
+      if (finalCheck && finalCheck.action === 'QUERY_DB') {
+        console.warn(`[${requestId}] WARNING: AI returned another query request. Converting to error message.`);
+        reply = "I apologize, but I'm having trouble processing your request. The system attempted to query the database multiple times. Please try rephrasing your question or contact support.";
+      }
+    } else {
+      console.log(`[${requestId}] Direct response (no DB query needed)`);
     }
 
     const duration = Date.now() - startTime;
