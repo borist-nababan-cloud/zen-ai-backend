@@ -72,7 +72,7 @@ try {
 
 // Helper function: Extract JSON from mixed content
 function extractJSONFromText(text) {
-  // Try to find JSON object in the text
+  // Try to find JSON object in the text using regex
   const jsonPattern = /\{[^{}]*"action"[^{}]*\}/;
   const match = text.match(jsonPattern);
 
@@ -189,7 +189,7 @@ app.post('/ask-ai', async (req, res) => {
     `;
 
     // --- ROUND 1: Ask AI ---
-    console.log(`[${requestId}] Calling OpenRouter API...`);
+    console.log(`[${requestId}] Calling OpenRouter API (Round 1)...`);
     const aiResponse = await axios.post(
       "https://openrouter.ai/api/v1/chat/completions",
       {
@@ -212,15 +212,18 @@ app.post('/ask-ai', async (req, res) => {
       }
     );
 
-    let reply = aiResponse.data.choices[0].message.content;
-    console.log(`[${requestId}] Received AI response, length: ${reply.length} chars`);
-    console.log(`[${requestId}] Response preview: ${reply.substring(0, 200)}...`);
+    let initialReply = aiResponse.data.choices[0].message.content;
+    console.log(`[${requestId}] Round 1 response received, length: ${initialReply.length} chars`);
+    console.log(`[${requestId}] Round 1 preview: ${initialReply.substring(0, 200)}...`);
 
     // --- CHECK FOR TOOL CALL ---
-    const toolCall = extractJSONFromText(reply);
+    const toolCall = extractJSONFromText(initialReply);
+
+    let finalReply = initialReply; // Default to initial response
 
     if (toolCall && toolCall.action === 'QUERY_DB') {
-      console.log(`[${requestId}] AI requesting DB query:`, toolCall);
+      console.log(`[${requestId}] ✓ Tool call detected, executing database query...`);
+      console.log(`[${requestId}] Query details:`, toolCall);
 
       // Validate view name to prevent SQL injection
       const validViews = [
@@ -231,7 +234,7 @@ app.post('/ask-ai', async (req, res) => {
       ];
 
       if (!validViews.includes(toolCall.view)) {
-        console.error(`[${requestId}] Invalid view name: ${toolCall.view}`);
+        console.error(`[${requestId}] ✗ Invalid view name: ${toolCall.view}`);
         return res.status(400).json({
           error: 'Invalid database view requested'
         });
@@ -247,28 +250,18 @@ app.post('/ask-ai', async (req, res) => {
         query = query.lte('tanggal', toolCall.filters.date_end);
       }
 
+      console.log(`[${requestId}] Executing Supabase query...`);
       const { data: dbResult, error } = await query;
 
       if (error) {
-        console.error(`[${requestId}] Database error:`, error);
+        console.error(`[${requestId}] ✗ Database error:`, error);
         throw error;
       }
 
-      console.log(`[${requestId}] DB query returned ${dbResult?.length || 0} rows`);
+      console.log(`[${requestId}] ✓ Query returned ${dbResult?.length || 0} rows`);
 
-      // Follow up with AI - EXPLICITLY request natural language response
-      const followUpPrompt = `
-        You previously received a database query result. Based on this data, provide a clear, friendly, conversational answer to the user's question: "${message}"
-
-        Database Results: ${JSON.stringify(dbResult)}
-
-        IMPORTANT:
-        - Respond in natural, conversational Markdown format
-        - DO NOT return JSON
-        - DO NOT include technical details
-        - Be helpful and friendly
-        - Use formatting (bullet points, tables) where appropriate
-      `;
+      // --- ROUND 2: Follow up with AI for natural language response ---
+      console.log(`[${requestId}] Calling OpenRouter API (Round 2) for final response...`);
 
       const followUp = await axios.post(
         "https://openrouter.ai/api/v1/chat/completions",
@@ -278,9 +271,10 @@ app.post('/ask-ai', async (req, res) => {
             { role: "system", content: systemPrompt },
             { role: "user", content: message },
             { role: "assistant", content: JSON.stringify(toolCall) },
-            { role: "user", content: followUpPrompt }
+            { role: "system", content: `DATABASE QUERY RESULTS: ${JSON.stringify(dbResult)}` },
+            { role: "user", content: "Please provide a clear, friendly, conversational answer based on these database results. Respond in natural Markdown format. DO NOT include JSON or technical details." }
           ],
-          temperature: 0.3, // Slightly higher for more natural responses
+          temperature: 0.3,
           max_tokens: 2000
         },
         {
@@ -294,52 +288,58 @@ app.post('/ask-ai', async (req, res) => {
         }
       );
 
-      reply = followUp.data.choices[0].message.content;
-      console.log(`[${requestId}] Final AI response received, length: ${reply.length} chars`);
+      finalReply = followUp.data.choices[0].message.content;
+      console.log(`[${requestId}] Round 2 response received, length: ${finalReply.length} chars`);
+      console.log(`[${requestId}] Round 2 preview: ${finalReply.substring(0, 200)}...`);
 
       // Final safety check: if response still contains JSON, try to clean it
-      const finalCheck = extractJSONFromText(reply);
+      const finalCheck = extractJSONFromText(finalReply);
       if (finalCheck && finalCheck.action === 'QUERY_DB') {
-        console.warn(`[${requestId}] WARNING: AI returned another query request. Converting to error message.`);
-        reply = "I apologize, but I'm having trouble processing your request. The system attempted to query the database multiple times. Please try rephrasing your question or contact support.";
+        console.warn(`[${requestId}] ⚠ WARNING: AI returned another query request. Providing fallback message.`);
+        finalReply = "I apologize, but I'm having trouble processing your request. The system attempted to query the database multiple times. Please try rephrasing your question or contact support.";
       }
+
+      console.log(`[${requestId}] ✓ Using Round 2 response (database query executed)`);
     } else {
-      console.log(`[${requestId}] Direct response (no DB query needed)`);
+      console.log(`[${requestId}] ✓ No database query needed, using Round 1 response`);
     }
 
     const duration = Date.now() - startTime;
-    console.log(`[${requestId}] Request completed in ${duration}ms`);
+    console.log(`[${requestId}] Request completed successfully in ${duration}ms`);
 
-    res.json({ reply });
+    // Return ONLY the final reply, never the initial mixed response
+    res.json({ reply: finalReply });
 
   } catch (error) {
     const duration = Date.now() - startTime;
 
     // Handle specific error types
     if (error.code === 'ECONNABORTED') {
-      console.error(`[${requestId}] Request timeout after ${duration}ms`);
+      console.error(`[${requestId}] ✗ Request timeout after ${duration}ms`);
       return res.status(504).json({
         error: 'Request timeout. The AI service took too long to respond.'
       });
     }
 
     if (error.response?.status === 429) {
-      console.error(`[${requestId}] Rate limited by OpenRouter`);
+      console.error(`[${requestId}] ✗ Rate limited by OpenRouter`);
       return res.status(429).json({
         error: 'Too many requests to AI service. Please try again later.'
       });
     }
 
     if (error.response?.status === 401) {
-      console.error(`[${requestId}] Invalid API key`);
+      console.error(`[${requestId}] ✗ Invalid API key`);
       return res.status(500).json({
         error: 'AI service authentication failed. Check API key.'
       });
     }
 
     // Generic error handler
-    console.error(`[${requestId}] Error after ${duration}ms:`, error.message);
-    console.error(error.stack);
+    console.error(`[${requestId}] ✗ Error after ${duration}ms:`, error.message);
+    if (error.stack) {
+      console.error(error.stack);
+    }
 
     res.status(500).json({
       error: 'Internal server error',
