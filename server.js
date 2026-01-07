@@ -118,6 +118,95 @@ app.get('/health', (_req, res) => {
   res.status(200).json(healthcheck);
 });
 
+// Test OpenRouter API key
+app.get('/test-openrouter', async (_req, res) => {
+  try {
+    const apiKey = process.env.OPENROUTER_API_KEY;
+
+    if (!apiKey) {
+      return res.status(500).json({
+        error: 'OPENROUTER_API_KEY not set in environment variables',
+        status: 'failed'
+      });
+    }
+
+    // Test API call to OpenRouter
+    const testResponse = await axios.post(
+      "https://openrouter.ai/api/v1/chat/completions",
+      {
+        model: "deepseek/deepseek-chat",
+        messages: [
+          { role: "user", content: "Say 'API key works!' in exactly those words." }
+        ],
+        max_tokens: 10
+      },
+      {
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          "HTTP-Referer": process.env.SITE_URL || "https://your-site.com",
+          "X-Title": "WMS Dashboard Test"
+        },
+        timeout: 10000
+      }
+    );
+
+    res.status(200).json({
+      status: 'success',
+      message: 'OpenRouter API key is valid',
+      response: testResponse.data.choices[0].message.content,
+      model: testResponse.data.model,
+      usage: testResponse.data.usage
+    });
+
+  } catch (error) {
+    console.error('OpenRouter test failed:', error.message);
+    console.error('Error details:', {
+      status: error.response?.status,
+      data: error.response?.data
+    });
+
+    res.status(500).json({
+      status: 'failed',
+      error: 'OpenRouter API key test failed',
+      details: {
+        message: error.message,
+        status: error.response?.status,
+        errorData: error.response?.data
+      }
+    });
+  }
+});
+
+// Test Supabase connection
+app.get('/test-supabase', async (_req, res) => {
+  try {
+    const testQuery = await supabase
+      .from('view_financial_dashboard')
+      .select('*')
+      .limit(1);
+
+    res.status(200).json({
+      status: 'success',
+      message: 'Supabase connection successful',
+      data: testQuery.data
+    });
+
+  } catch (error) {
+    console.error('Supabase test failed:', error);
+
+    res.status(500).json({
+      status: 'failed',
+      error: 'Supabase connection test failed',
+      details: {
+        message: error.message,
+        hint: error.hint,
+        code: error.code
+      }
+    });
+  }
+});
+
 // Root endpoint
 app.get('/', (_req, res) => {
   res.json({
@@ -126,7 +215,15 @@ app.get('/', (_req, res) => {
     status: 'operational',
     endpoints: {
       health: '/health',
+      testOpenRouter: '/test-openrouter',
+      testSupabase: '/test-supabase',
       askAI: 'POST /ask-ai'
+    },
+    documentation: {
+      health: 'Check service health',
+      testOpenRouter: 'Test OpenRouter API key',
+      testSupabase: 'Test Supabase database connection',
+      askAI: 'Main AI chatbot endpoint'
     }
   });
 });
