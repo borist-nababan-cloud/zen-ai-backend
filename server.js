@@ -8,19 +8,21 @@ const axios = require('axios');
 
 const app = express();
 
+// CORS configuration - MUST come before helmet
+const corsOptions = {
+  origin: process.env.ALLOWED_ORIGINS?.split(',') || '*',
+  credentials: true,
+  optionsSuccessStatus: 200,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+};
+app.use(cors(corsOptions));
+
 // Security middleware
 app.use(helmet({
   contentSecurityPolicy: false, // Disable for API
   crossOriginEmbedderPolicy: false
 }));
-
-// CORS configuration - restrict in production
-const corsOptions = {
-  origin: process.env.ALLOWED_ORIGINS?.split(',') || '*',
-  credentials: true,
-  optionsSuccessStatus: 200
-};
-app.use(cors(corsOptions));
 
 // Body parsing with size limits
 app.use(express.json({ limit: '10mb' }));
@@ -228,8 +230,11 @@ app.get('/', (_req, res) => {
   });
 });
 
+// Handle OPTIONS preflight requests explicitly
+app.options('/ask-ai', cors(corsOptions));
+
 // Main AI endpoint
-app.post('/ask-ai', async (req, res) => {
+app.post('/ask-ai', cors(corsOptions), async (req, res) => {
   const requestId = Math.random().toString(36).substring(7);
   const startTime = Date.now();
 
