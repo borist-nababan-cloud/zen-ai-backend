@@ -137,6 +137,15 @@ app.post('/ask-ai', async (req, res) => {
   const startTime = Date.now();
 
   console.log(`[${requestId}] Received AI request`);
+  console.log(`[${requestId}] Request body keys:`, Object.keys(req.body));
+  console.log(`[${requestId}] Message: ${req.body.message?.substring(0, 100)}...`);
+  console.log(`[${requestId}] Page name: ${req.body.pageName || 'not provided'}`);
+  console.log(`[${requestId}] Context data type: ${typeof req.body.contextData}`);
+  console.log(`[${requestId}] Environment check:`, {
+    hasOpenRouterKey: !!process.env.OPENROUTER_API_KEY,
+    hasSupabaseUrl: !!process.env.SUPABASE_URL,
+    hasSupabaseKey: !!process.env.SUPABASE_SERVICE_ROLE_KEY
+  });
 
   try {
     const { message, contextData, pageName } = req.body;
@@ -313,38 +322,61 @@ app.post('/ask-ai', async (req, res) => {
   } catch (error) {
     const duration = Date.now() - startTime;
 
+    // Comprehensive error logging
+    console.error(`\n========== ERROR DETAILS [${requestId}] ==========`);
+    console.error(`Error Type:`, error.constructor.name);
+    console.error(`Error Message:`, error.message);
+    console.error(`Error Code:`, error.code);
+    console.error(`Duration:`, duration, 'ms');
+    console.error(`OpenRouter Status:`, error.response?.status);
+    console.error(`OpenRouter Data:`, error.response?.data);
+    console.error(`Request URL:`, error.config?.url);
+    console.error(`Request Method:`, error.config?.method);
+
+    if (error.stack) {
+      console.error(`\nStack Trace:`);
+      console.error(error.stack);
+    }
+
+    console.error(`\nEnvironment at error time:`);
+    console.error(`  NODE_ENV:`, process.env.NODE_ENV);
+    console.error(`  Has OPENROUTER_API_KEY:`, !!process.env.OPENROUTER_API_KEY);
+    console.error(`  Has SUPABASE_URL:`, !!process.env.SUPABASE_URL);
+    console.error(`  Has SUPABASE_SERVICE_ROLE_KEY:`, !!process.env.SUPABASE_SERVICE_ROLE_KEY);
+    console.error(`========================================\n`);
+
     // Handle specific error types
     if (error.code === 'ECONNABORTED') {
-      console.error(`[${requestId}] ✗ Request timeout after ${duration}ms`);
       return res.status(504).json({
-        error: 'Request timeout. The AI service took too long to respond.'
+        error: 'Request timeout. The AI service took too long to respond.',
+        requestId
       });
     }
 
     if (error.response?.status === 429) {
-      console.error(`[${requestId}] ✗ Rate limited by OpenRouter`);
       return res.status(429).json({
-        error: 'Too many requests to AI service. Please try again later.'
+        error: 'Too many requests to AI service. Please try again later.',
+        requestId
       });
     }
 
     if (error.response?.status === 401) {
-      console.error(`[${requestId}] ✗ Invalid API key`);
       return res.status(500).json({
-        error: 'AI service authentication failed. Check API key.'
+        error: 'AI service authentication failed. Check API key.',
+        requestId
       });
     }
 
     // Generic error handler
-    console.error(`[${requestId}] ✗ Error after ${duration}ms:`, error.message);
-    if (error.stack) {
-      console.error(error.stack);
-    }
-
     res.status(500).json({
       error: 'Internal server error',
       message: process.env.NODE_ENV === 'development' ? error.message : undefined,
-      requestId
+      requestId,
+      details: process.env.NODE_ENV === 'development' ? {
+        type: error.constructor.name,
+        code: error.code,
+        apiStatus: error.response?.status
+      } : undefined
     });
   }
 });
