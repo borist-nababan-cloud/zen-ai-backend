@@ -27,3 +27,10 @@ Thumbs.db
 dist/
 build/
 zenaibackend/
+
+# Added by Agent for safety
+.env
+*.sql
+*.md
+!README.md
+docs/
