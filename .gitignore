@@ -34,3 +34,15 @@ zenaibackend/
 *.md
 !README.md
 docs/
+
+*.env
+.env
+*.sql
+docs/
+
+
+*.env
+.env
+*.sql
+docs/
+
